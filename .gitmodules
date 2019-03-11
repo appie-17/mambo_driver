@@ -1,0 +1,3 @@
+[submodule "src/pyparrot"]
+	path = src/pyparrot
+	url = https://github.com/amymcgovern/pyparrot.git
