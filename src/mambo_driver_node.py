@@ -1,5 +1,7 @@
 #!/usr/bin/env python
-import rospy
+import rospy, rospkg, os, cv2
+from threading import Lock
+from std_srvs import srv as service
 from std_msgs.msg import Empty, UInt8, Bool
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
@@ -7,9 +9,15 @@ from dynamic_reconfigure.server import Server
 from mambo_driver.msg import MamboTelem
 from mambo_driver.cfg import MamboConfig
 
-from pyparrot.networking.bleConnection import BLEConnection
-from pyparrot.Minidrone import Mambo
+from sensor_msgs.msg import Image, CameraInfo
+from cv_bridge import CvBridge, CvBridgeError
+import camera_info_manager as cim
 
+from pyparrot.utils.colorPrint import color_print
+from pyparrot.networking.bleConnection import BLEConnection
+from pyparrot.Minidrone import Mambo, MinidroneSensors
+
+rospack = rospkg.RosPack()
 
 def notify_cmd_success(cmd, success):
     if success:
@@ -17,127 +25,136 @@ def notify_cmd_success(cmd, success):
     else:
         rospy.logwarn('%s command failed' % cmd)
 
-
-class MamboNode(Mambo):
+class MamboNode(Mambo, object):
     def __init__(self):
-        self.timer_telem = None
-
+        self.update_timeLast = rospy.Time(0)
+        self.vid_stream = None
+        self.test = MinidroneSensors()
         # Fetch parameters
-        self.use_wifi = rospy.get_param('~use_wifi', False)
-        self.bluetooth_addr = rospy.get_param('~bluetooth_addr')
+        self.use_wifi = rospy.get_param('~use_wifi', True)
+        self.bluetooth_addr = rospy.get_param('~bluetooth_addr', '')
         self.num_connect_retries = rospy.get_param('~num_connect_retries', 3)
 
         # Connect to drone
-        super(MamboNode, self).__init__(self.bluetooth_addr, self.use_wifi)
+        self.mambo = super(MamboNode, self).__init__(self.bluetooth_addr, self.use_wifi)
+        self.sensors = MamboTelem()
+        self.odom_msg = Odometry()
+        self.odom_msg.pose.pose.orientation.w = 0
         rospy.loginfo('Connecting to Mambo drone...')
         connected = self.connect(self.num_connect_retries)
         if not connected:
             rospy.logerr('Failed to connect to Mambo drone')
             raise IOError('Failed to connect to Mambo drone')
         rospy.loginfo('Connected to Mambo drone')
-        rospy.on_shutdown(self.cb_shutdown)
+
+        # Setup topics and services
+        # NOTE: ROS interface deliberately made to resemble bebop_autonomy
+        self.pub_telem = rospy.Publisher('telemetry', MamboTelem, queue_size=1, latch=True)
+        self.pub_odom = rospy.Publisher('odom', Odometry, queue_size=1, latch=True)
+        self.pub_caminfo = rospy.Publisher('camera/camera_info', CameraInfo, queue_size=1, latch=True)    			       
+        self.pub_image = rospy.Publisher('camera/image_raw', Image, queue_size=1)
+        self.sub_takeoff = rospy.Subscriber('takeoff', Empty, self.cb_takeoff, queue_size=1)
+        self.sub_land = rospy.Subscriber('land', Empty, self.cb_land, queue_size=1)
+        self.sub_cmd_vel = rospy.Subscriber('cmd_vel', Twist, self.cb_cmd_vel, queue_size=1)
+        self.sub_reset = rospy.Subscriber('reset', Empty, self.cb_reset, queue_size=1)
+        self.sub_flattrim = rospy.Subscriber('flattrim', Empty, self.cb_flattrim, queue_size=1)
+        self.sub_pilotmode = rospy.Service('pilot_mode', service.Empty, self.cb_pilot_mode)
+        self.sub_togglecam = rospy.Subscriber('toggle_cam', Empty, self.cb_toggle_cam, queue_size=1)
+        self.sub_snapshot = rospy.Subscriber('snapshot', Empty, self.cb_snapshot, queue_size=1)
+        self.sub_flip = rospy.Subscriber('flip', UInt8, self.cb_flip, queue_size=1)
+        self.sub_auto_takeoff = rospy.Subscriber('auto_takeoff', Empty, self.cb_auto_takeoff, queue_size=1)
 
         # Setup dynamic reconfigure
         self.cfg = None
         self.srv_dyncfg = Server(MamboConfig, self.cb_dyncfg)
 
-        # Setup topics and services
-        # NOTE: ROS interface deliberately made to resemble bebop_autonomy
-        self.pub_telem = rospy.Publisher(
-            '~telemetry', MamboTelem, queue_size=1, latch=True)
-        self.pub_odom = rospy.Publisher(
-            '~odom', Odometry, queue_size=1, latch=True)
-        self.set_user_sensor_callback(self.cb_sensor_update)
-
-        # TODO: remove if interval-pulls work
-        # Request states of all sensors from drone
-        # NOTE: sleeps prescribed by pyparrot package, presumably to sync
-        # self.smart_sleep(2)
-        # self.ask_for_state_update()
-        # self.smart_sleep(2)
-        self.sub_pull = rospy.Subscriber(
-            '~pull', Empty, self.cb_pull)  # TODO: remove debug
-
-        self.sub_takeoff = rospy.Subscriber('takeoff', Empty, self.cb_takeoff)
-        self.sub_auto_takeoff = rospy.Subscriber(
-            'auto_takeoff', Empty, self.cb_auto_takeoff)
-        self.sub_land = rospy.Subscriber('land', Empty, self.cb_land)
-        self.sub_reset = rospy.Subscriber('reset', Empty, self.cb_reset)
-        self.sub_flattrim = rospy.Subscriber(
-            'flattrim', Empty, self.cb_flattrim)
-        self.sub_snapshot = rospy.Subscriber(
-            'snapshot', Empty, self.cb_snapshot)
-        self.sub_flip = rospy.Subscriber('flip', UInt8, self.cb_flip)
-        self.sub_cmd_vel = rospy.Subscriber('cmd_vel', Twist, self.cb_cmd_vel)
+        rospy.on_shutdown(self.cb_shutdown)
 
         rospy.loginfo('Mambo driver node ready')
-
-    def cb_pull(self, msg):  # TODO: remove
-        rospy.loginfo('Requesting state pull')
-        self.ask_for_state_update()
 
     def cb_shutdown(self):
         self.disconnect()
 
-    # TODO: actually probably don't need a pull, once called ask_for_state_update() once and start flying
-    def update_telem_timer(self):
-        if self.timer_telem is not None:
-            self.timer_telem.shutdown()
-        self.timer_telem = rospy.Timer(rospy.Duration(
-            1./self.cfg.telemetry_rate_hz), self.cb_pull_telem)
+    def cb_sensor_update(self, sensor_list):
+        if (sensor_list is not None):
+            for sensor in sensor_list:
+                (sensor_name, sensor_value, sensor_enum, header_tuple) = sensor
 
-    def cb_pull_telem(self, event):
-        # self.ask_for_state_update() # TODO: disabled since seem to be causing infinite loop
-        pass
-        # NOTE: non-blocking, so need to async wait for AllStatesChanged;
-        #       see cb_sensor_update()
+                if (sensor_name is not None):
+                    if (sensor_name, "enum") in sensor_enum:
+            		# grab the string value
+                        if (sensor_value > len(sensor_enum[(sensor_name, "enum")])):
+                            sensor_value = "UNKNOWN_ENUM_VALUE"
+                        else:
+                            enum_value = sensor_enum[(sensor_name, "enum")][sensor_value]
+                            sensor_value = enum_value
+                    #self.sensors_changed[sensor_name] = sensor_value
+                    # TODO: Add pilot modes (easy, medium, hard)
+                    if (sensor_name == "BatteryStateChanged_battery_percent"):
+                        self.sensors.battery_percent = sensor_value
+                    elif (sensor_name == "FlyingStateChanged_state"):
+                        self.sensors.flying_state = sensor_value
+                    elif (sensor_name == "FlyingModeChanged_mode"):
+                        self.sensors.flying_mode = sensor_value
+                    elif (sensor_name == "PlaneGearBoxChanged_state"):
+                        self.sensors.plane_gear_box = sensor_value
+                    elif (sensor_name == "GunState_id"):
+                        self.sensors.gun_id = int(sensor_value)
+                    elif (sensor_name == "GunState_state"):
+                        self.sensors.gun_state = str(sensor_value)
+                    elif (sensor_name == "ClawState_id"):
+                        self.sensors.claw_id = int(sensor_value)
+                    elif (sensor_name == "ClawState_state"):
+                        self.sensors.claw_state = str(sensor_value)                                        
+                    elif (sensor_name == "PilotingModeChanged_mode"):
+                        self.sensors.pilot_mode = sensor_value
+                        # TODO: check and document units
+                    elif (sensor_name == "DroneAltitude_altitude"):
+                        self.odom_msg.pose.pose.position.z = sensor_value*1000
+                    elif (sensor_name == "DroneQuaternion_q_w"):
+                        self.odom_msg.pose.pose.orientation.w = sensor_value
+                    elif (sensor_name == "DroneQuaternion_q_x"):
+                        self.odom_msg.pose.pose.orientation.x = sensor_value
+                    elif (sensor_name == "DroneQuaternion_q_y"):
+                        self.odom_msg.pose.pose.orientation.y = sensor_value
+                    elif (sensor_name == "DroneQuaternion_q_z"):
+                        self.odom_msg.pose.pose.orientation.z = sensor_value
+                        # TODO: check and document units
+                    elif (sensor_name == "DroneSpeed_speed_x"):
+                        self.odom_msg.twist.twist.linear.y = sensor_value
+                    elif (sensor_name == "DroneSpeed_speed_y"):
+                        self.odom_msg.twist.twist.linear.x = sensor_value
+                    elif (sensor_name == "DroneSpeed_speed_z"):
+                        self.odom_msg.twist.twist.linear.z = sensor_value
+                    # TODO: currently not using timestamp of packages which is in msec, approx. since connected with drone
+                    else:
+                        pass
+                else:
+                    color_print(
+                        "data type %d buffer id %d sequence number %d" % (data_type, buffer_id, sequence_number),
+                        "WARN")
+                    color_print("This sensor is missing (likely because we don't need it)", "WARN")
 
-    def cb_sensor_update(self, sensor_obj, upd_name, upd_value, opt_args):
-        if upd_name == 'AllStatesChanged':
-            telem_msg = MamboTelem()
-            telem_msg.battery_percent = sensor_obj.battery
-            telem_msg.flying_state = sensor_obj.flying_state
-            telem_msg.flying_mode = sensor_obj.flying_mode
-            telem_msg.plane_gear_box = sensor_obj.plane_gear_box
-            telem_msg.gun_id = int(sensor_obj.gun_id)
-            telem_msg.gun_state = str(sensor_obj.gun_state)
-            telem_msg.claw_id = int(sensor_obj.claw_id)
-            telem_msg.claw_state = str(sensor_obj.claw_state)
-
-            odom_msg = Odometry()
-            odom_msg.child_frame_id = 'Mambo'
-            odom_msg.pose.pose.position.x = 0
-            odom_msg.pose.pose.position.y = 0
-            # TODO: check and document units
-            odom_msg.pose.pose.position.z = sensor_obj.altitude
-            odom_msg.pose.pose.orientation.w = sensor_obj.quaternion_w
-            odom_msg.pose.pose.orientation.x = sensor_obj.quaternion_x
-            odom_msg.pose.pose.orientation.y = sensor_obj.quaternion_y
-            odom_msg.pose.pose.orientation.z = sensor_obj.quaternion_z
-            # TODO: check and document units
-            odom_msg.twist.twist.linear.x = sensor_obj.speed_x
-            odom_msg.twist.twist.linear.y = sensor_obj.speed_y
-            odom_msg.twist.twist.linear.z = sensor_obj.speed_z
-
-            self.pub_telem.publish(telem_msg)
-            self.pub_odom.publish(odom_msg)
-
-        # TODO: remove debugs below
-        # elif upd_name in ('DroneSpeed_ts', 'DroneAltitude_ts', 'DroneQuaternion_ts'):
-        #    rospy.logwarn('D> %s %s' % (upd_name, str(upd_value)))
-        #rospy.logwarn('DS> %s %s' % (upd_name, str(upd_value)))
+            self.odom_msg.child_frame_id = 'Mambo'
+            self.odom_msg.header.stamp = rospy.Time.now()
+            self.odom_msg.pose.pose.position.x = 0
+            self.odom_msg.pose.pose.position.y = 0
+#            print(self.test.quaternion_to_euler_angle(self.odom_msg.pose.pose.orientation.w, self.odom_msg.pose.pose.orientation.x,
+            #self.odom_msg.pose.pose.orientation.y,self.odom_msg.pose.pose.orientation.z))
+            self.pub_telem.publish(self.sensors)
+            self.pub_odom.publish(self.odom_msg)
 
     def cb_dyncfg(self, config, level):
         update_all = False
         if self.cfg is None:
             self.cfg = config
             update_all = True
-        if update_all or self.cfg.telemetry_rate_hz != config.telemetry_rate_hz:
-            self.update_telem_timer()
         if update_all or self.cfg.max_vert_speed_mps != config.max_vert_speed_mps:
             self.set_max_vertical_speed(config.max_vert_speed_mps)
         if update_all or self.cfg.max_tilt_deg != config.max_tilt_deg:
             self.set_max_tilt(config.max_tilt_deg)
+        if update_all or self.cfg.preferred_pilot_mode != config.preferred_pilot_mode:
+            self.set_preferred_pilot_mode(config.preferred_pilot_mode)
         # TODO: are there any other configs from pyparrot? from minidrone.xml?
         self.cfg = config
         return self.cfg
@@ -164,22 +181,54 @@ class MamboNode(Mambo):
     def cb_flattrim(self, msg):
         success = self.flat_trim()
         notify_cmd_success('FlatTrim', success)
+        
+    def cb_pilot_mode(self, srv):
+        success = self.toggle_pilot_mode(self.cfg.cmd_timeout_sec)
+        notify_cmd_success('TogglePilotMode', success)
+        return service.EmptyResponse()
 
+    def cb_toggle_cam(self, msg):
+        #True if module not loaded
+        if (os.system('lsmod | grep v4l2loopback -q')): 
+            rospy.logwarn("Please run command: \"sudo modprobe v4l2loopback\"")
+        elif self.vid_stream==None:
+            calib_path = rospack.get_path('mambo_driver') + '/cam_calib/ost.yaml'
+            calib_path = rospy.get_param('~cam_calib', calib_path)
+            self.caminfo = cim.loadCalibrationFile(calib_path, 'mambo')
+                                    
+            bashCommand = "ffmpeg -i rtsp://192.168.99.1/media/stream2 -f v4l2 /dev/video1 > ~/Mothership/catkin_parrot/output.log 2>&1 < /dev/null &"
+            os.system(bashCommand)
+            self.bridge = CvBridge()
+            self.stream = cv2.VideoCapture('/dev/video1')
+            rospy.loginfo('Piping stream to \'/dev/video1\'')        
+            cam_fps = rospy.get_param('~cam_fps', 40)
+
+            rospy.Timer(rospy.Duration(1.0/cam_fps), self.publish_video)
+
+    def publish_video(self, event):
+        try:
+            _, frame = self.stream.read()
+            if frame is not None:
+                self.pub_image.publish(self.bridge.cv2_to_imgmsg(frame,'rgb8'))
+                self.pub_caminfo.publish(self.caminfo)
+        except CvBridgeError as e:
+            print(e)
+                
     def cb_snapshot(self, msg):
-        self.flat_trim()
+        success = self.flat_trim()
         notify_cmd_success('Snapshot', success)
 
     def cb_flip(self, msg):
-        if msg.data == 0:
+        if msg.data == 1:
             task = 'Flip Front'
             success = self.flip('front')
-        elif msg.data == 1:
+        elif msg.data == 2:
             task = 'Flip Back'
             success = self.flip('back')
-        elif msg.data == 2:
+        elif msg.data == 3:
             task = 'Flip Right'
             success = self.flip('right')
-        elif msg.data == 3:
+        elif msg.data == 4:
             task = 'Flip Left'
             success = self.flip('left')
         else:
@@ -188,12 +237,48 @@ class MamboNode(Mambo):
         notify_cmd_success(task, success)
 
     def cb_cmd_vel(self, msg):
-        pitch = msg.linear.x*100
-        roll = msg.linear.y*100
-        yaw = msg.angular.z*100
+        pitch = msg.linear.y*100
+        roll = -msg.linear.x*100
+        yaw = -msg.angular.z*100
         vertical_movement = msg.linear.z*100
-        # TODO: fix this, having to force a 100ms duration
-        # self.fly_direct(roll, pitch, yaw, vertical_movement, 0.1) # TODO: fix this: don't send if drone state not flying
+        
+        self.fly_direct(roll, pitch, yaw, vertical_movement) # TODO: fix this: don't send if drone state not flying
+    '''------------------OVERRIDING FUNCTIONS------------------'''
+    def set_preferred_pilot_mode(self, mode):
+        """
+        Sets the preferred piloting mode. Ensures you choose from "easy", "medium", "difficult".
+
+        :param value: preferred piloting mode
+        :return: True if the command was sent and False otherwise
+        """
+
+        if (mode not in ["easy", "medium", "difficult"]):
+            print("Ensures you choose piloting mode from \"easy\", \"medium\", \"difficult\".")
+            return
+
+        (command_tuple, enum_tuple) = self.command_parser.get_command_tuple_with_enum("minidrone", "PilotingSettings", "PreferredPilotingMode", mode)
+
+        return self.drone_connection.send_enum_command_packet_ack(command_tuple,enum_tuple)
+    
+    def toggle_pilot_mode(self, timeout):
+        """
+        Sends the TogglePilotMode command to the mambo.  Gets the codes for it from the xml files.  Ensures the
+        packet was received or sends it again up to a maximum number of times.
+
+        :return: True if the command was sent and False otherwise
+        """
+        start_time = rospy.Time.now()
+
+        pilot_mode = self.sensors.pilot_mode
+
+        while (self.sensors.pilot_mode == pilot_mode and (rospy.Time.now() - start_time < rospy.Duration(timeout))):
+            if (self.sensors.flying_state == "emergency"):
+                return
+            color_print("changing pilot_mode", "INFO")
+            command_tuple = self.command_parser.get_command_tuple("minidrone", "Piloting", "TogglePilotingMode")            
+            self.smart_sleep(1)
+
+        return self.drone_connection.send_noparam_command_packet_ack(command_tuple)
 
     def smart_sleep(self, timeout):
         """
@@ -218,17 +303,33 @@ class MamboNode(Mambo):
                     # color_print("reconnecting to wait", "WARN")
                     self.drone_connection._reconnect(self.num_connect_retries)
             else:  # assume WifiConnection
-                rospy.logerr('D> %s' %
-                             str(type(self.drone_connection)))  # TODO: remove
                 rospy.sleep(sleep_quanta_sec)
             dt = (rospy.Time.now() - start_time).to_sec()
 
+	#Modify MinidroneSensors class to process sensor values directly into ROS msg
+    def update_sensors(self, data_type, buffer_id, sequence_number, raw_data, ack):
+        """
+        Update the sensors (called via the wifi or ble connection)
+
+        :param data: raw data packet that needs to be parsed
+        :param ack: True if this packet needs to be ack'd and False otherwise
+        """
+        self.sensors_updated = {}
+
+        sensor_list = self.sensor_parser.extract_sensor_values(raw_data)
+
+		#Dictionary with updated sensors from current package send by drone
+        #print("Sensors changed {},\n secs since last package: {}".format(self.sensors_changed, (rospy.Time.now() - self.update_timeLast).to_sec()))
+        self.cb_sensor_update(sensor_list)
+        self.update_timeLast = rospy.Time.now()
+
+        if (ack):
+            self.drone_connection.ack_packet(buffer_id, sequence_number)                
 
 def main():
     rospy.init_node('mambo_node')
     robot = MamboNode()
     rospy.spin()
-
 
 if __name__ == '__main__':
     main()
