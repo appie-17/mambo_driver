@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-import sys
-sys.path.insert(0,'~/.local/lib/python2.7/site-packages')
-import rospy, rospkg, os, cv2
+import sys, os
+sys.path.insert(0,os.environ['HOME'] + '/.local/lib/python2.7/site-packages')
+import rospy, rospkg, cv2
 from threading import Lock
 from std_srvs import srv as service
 from std_msgs.msg import Empty, UInt8, Bool

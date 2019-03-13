@@ -1,9 +1,12 @@
 <?xml version="1.0"?>
 <launch>
     <arg name="namespace" default="mambo" />
-    <arg name="use_wifi" default="False" />
+    <arg name="use_wifi" default="True" />
     <arg name="bluetooth_addr" default="e0:14:ef:39:3d:d1" />
 
+	<node pkg="image_proc" name="image_rectify" type="image_proc" ns="$(arg namespace)/camera">
+	</node>
+	
     <group ns="$(arg namespace)">
         <node pkg="mambo_driver" name="mambo" type="mambo_driver_node.py" output="screen">
             <param name="use_wifi" value="$(arg use_wifi)" />
