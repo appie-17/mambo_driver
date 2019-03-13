@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+import sys
+sys.path.insert(0,'~/.local/lib/python2.7/site-packages')
 import rospy, rospkg, os, cv2
 from threading import Lock
 from std_srvs import srv as service
@@ -192,11 +194,11 @@ class MamboNode(Mambo, object):
         if (os.system('lsmod | grep v4l2loopback -q')): 
             rospy.logwarn("Please run command: \"sudo modprobe v4l2loopback\"")
         elif self.vid_stream==None:
-            calib_path = rospack.get_path('mambo_driver') + '/cam_calib/ost.yaml'
+            calib_path = rospack.get_path('mambo_driver') + '/cam_calib/default.yaml'
             calib_path = rospy.get_param('~cam_calib', calib_path)
-            self.caminfo = cim.loadCalibrationFile(calib_path, 'mambo')
+            self.caminfo = cim.loadCalibrationFile(calib_path, 'mambo_fpv')
                                     
-            bashCommand = "ffmpeg -i rtsp://192.168.99.1/media/stream2 -f v4l2 /dev/video1 > ~/Mothership/catkin_parrot/output.log 2>&1 < /dev/null &"
+            bashCommand = "ffmpeg -i rtsp://192.168.99.1/media/stream2 -f v4l2 /dev/video1 > ~/output.log 2>&1 < /dev/null &"
             os.system(bashCommand)
             self.bridge = CvBridge()
             self.stream = cv2.VideoCapture('/dev/video1')

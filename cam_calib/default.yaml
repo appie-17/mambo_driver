@@ -1,6 +1,6 @@
 image_width: 640
 image_height: 360
-camera_name: narrow_stereo
+camera_name: mambo_fpv
 camera_matrix:
   rows: 3
   cols: 3
