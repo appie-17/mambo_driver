@@ -1,8 +1,10 @@
 int8 battery_percent
 
 string flying_state
-string pilot_mode
+string flying_mode
 string plane_gear_box
+
+string pilot_mode
 
 int8 gun_id
 string gun_state
