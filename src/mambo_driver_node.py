@@ -3,7 +3,6 @@ import sys, os
 sys.path.insert(0,os.environ['HOME'] + '/.local/lib/python2.7/site-packages')
 import rospy, rospkg, cv2
 from threading import Lock
-from std_srvs import srv as service
 from std_msgs.msg import Empty, UInt8, Bool
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
@@ -58,9 +57,9 @@ class MamboNode(Mambo, object):
         self.sub_takeoff = rospy.Subscriber('takeoff', Empty, self.cb_takeoff, queue_size=1)
         self.sub_land = rospy.Subscriber('land', Empty, self.cb_land, queue_size=1)
         self.sub_cmd_vel = rospy.Subscriber('cmd_vel', Twist, self.cb_cmd_vel, queue_size=1)
-        self.sub_reset = rospy.Subscriber('reset', Empty, self.cb_reset, queue_size=1)
+        self.sub_emergency = rospy.Subscriber('emergency', Empty, self.cb_emergency, queue_size=1)
         self.sub_flattrim = rospy.Subscriber('flattrim', Empty, self.cb_flattrim, queue_size=1)
-        self.sub_pilotmode = rospy.Service('pilot_mode', service.Empty, self.cb_pilot_mode)
+        self.sub_pilotmode = rospy.Subscriber('pilot_mode', Empty, self.cb_pilot_mode)
         self.sub_togglecam = rospy.Subscriber('toggle_cam', Empty, self.cb_toggle_cam, queue_size=1)
         self.sub_snapshot = rospy.Subscriber('snapshot', Empty, self.cb_snapshot, queue_size=1)
         self.sub_flip = rospy.Subscriber('flip', UInt8, self.cb_flip, queue_size=1)
@@ -157,6 +156,8 @@ class MamboNode(Mambo, object):
             self.set_max_tilt(config.max_tilt_deg)
         if update_all or self.cfg.preferred_pilot_mode != config.preferred_pilot_mode:
             self.set_preferred_pilot_mode(config.preferred_pilot_mode)
+        if update_all or self.cfg.banked_turn_mode != config.banked_turn_mode:
+            self.set_banked_turn_mode(config.banked_turn_mode)
         # TODO: are there any other configs from pyparrot? from minidrone.xml?
         self.cfg = config
         return self.cfg
@@ -176,18 +177,17 @@ class MamboNode(Mambo, object):
         success = self.safe_land(self.cfg.cmd_timeout_sec)
         notify_cmd_success('Land', success)
 
-    def cb_reset(self, msg):
+    def cb_emergency(self, msg):
         success = self.safe_emergency(self.cfg.cmd_timeout_sec)
-        notify_cmd_success('Reset', success)
+        notify_cmd_success('Emergency', success)
 
     def cb_flattrim(self, msg):
         success = self.flat_trim()
         notify_cmd_success('FlatTrim', success)
         
-    def cb_pilot_mode(self, srv):
+    def cb_pilot_mode(self, msg):
         success = self.toggle_pilot_mode(self.cfg.cmd_timeout_sec)
         notify_cmd_success('TogglePilotMode', success)
-        return service.EmptyResponse()
 
     def cb_toggle_cam(self, msg):
         #True if module not loaded
@@ -240,13 +240,25 @@ class MamboNode(Mambo, object):
 
     def cb_cmd_vel(self, msg):
         pitch = msg.linear.y*100
-        roll = -msg.linear.x*100
-        yaw = -msg.angular.z*100
+        roll = msg.linear.x*100
+        yaw = msg.angular.z*100
         vertical_movement = msg.linear.z*100
         
         self.fly_direct(roll, pitch, yaw, vertical_movement) # TODO: fix this: don't send if drone state not flying
 
+
+########################    ADDED FUNCTIONS    ################################
+    def set_banked_turn_mode(self, arg):
+        """
+        Turn on/off the banked turn mode
+        :return: True if the command was sent and False otherwise
+        """
+        command_tuple = self.command_parser.get_command_tuple("minidrone", "PilotingSettings", "BankedTurn")
+
+        return self.drone_connection.send_param_command_packet(command_tuple, param_tuple=[arg], param_type_tuple=["u8"])
+
 #########################    OVERRIDING FUNCTIONS    ###########################
+
     def set_preferred_pilot_mode(self, mode):
         """
         Sets the preferred piloting mode. Ensures you choose from "easy", "medium", "difficult".
