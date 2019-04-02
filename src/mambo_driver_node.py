@@ -245,7 +245,8 @@ class MamboNode(Mambo, object):
         vertical_movement = msg.linear.z*100
         
         self.fly_direct(roll, pitch, yaw, vertical_movement) # TODO: fix this: don't send if drone state not flying
-    '''------------------OVERRIDING FUNCTIONS------------------'''
+
+#########################    OVERRIDING FUNCTIONS    ###########################
     def set_preferred_pilot_mode(self, mode):
         """
         Sets the preferred piloting mode. Ensures you choose from "easy", "medium", "difficult".
@@ -327,6 +328,8 @@ class MamboNode(Mambo, object):
 
         if (ack):
             self.drone_connection.ack_packet(buffer_id, sequence_number)                
+
+#################################################################################
 
 def main():
     rospy.init_node('mambo_node')
