@@ -1,24 +1,30 @@
 #!/usr/bin/env python
 import sys, os
+### Needed to import correct OpenCV version....
 sys.path.insert(0,os.environ['HOME'] + '/.local/lib/python2.7/site-packages')
-import rospy, rospkg, cv2
+
+import rospy
+import cv2
+
 from threading import Lock
+from dynamic_reconfigure.server import Server
+from rospkg import RosPack
+
+from cv_bridge import CvBridge, CvBridgeError
+import camera_info_manager as cim
+
 from std_msgs.msg import Empty, UInt8, Bool
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-from dynamic_reconfigure.server import Server
+from sensor_msgs.msg import Image, CameraInfo
+
 from mambo_driver.msg import MamboTelem
 from mambo_driver.cfg import MamboConfig
-
-from sensor_msgs.msg import Image, CameraInfo
-from cv_bridge import CvBridge, CvBridgeError
-import camera_info_manager as cim
 
 from pyparrot.utils.colorPrint import color_print
 from pyparrot.networking.bleConnection import BLEConnection
 from pyparrot.Minidrone import Mambo, MinidroneSensors
 
-rospack = rospkg.RosPack()
 
 def notify_cmd_success(cmd, success):
     if success:
@@ -28,24 +34,31 @@ def notify_cmd_success(cmd, success):
 
 class MamboNode(Mambo, object):
     def __init__(self):
-        self.update_timeLast = rospy.Time(0)
         self.vid_stream = None
-        self.test = MinidroneSensors()
+
         # Fetch parameters
         self.use_wifi = rospy.get_param('~use_wifi', True)
         self.bluetooth_addr = rospy.get_param('~bluetooth_addr', '')
         self.num_connect_retries = rospy.get_param('~num_connect_retries', 3)
+        self.device_node = rospy.get_param('~device_node', "/dev/video1")
+        self.cam_fps = rospy.get_param('~cam_fps', 40)      
+        default_calib_path = RosPack().get_path('mambo_driver') + '/cam_calib/default.yaml'
+        self.calib_path = rospy.get_param('~camera_calib', default_calib_path) 
+        self.caminfo = cim.loadCalibrationFile(self.calib_path, 'camera_front')
+        self.caminfo.header.frame_id = rospy.get_param('~camera_frame', 'camera_front')
 
         # Connect to drone
         self.mambo = super(MamboNode, self).__init__(self.bluetooth_addr, self.use_wifi)
         self.sensors = MamboTelem()
         self.odom_msg = Odometry()
-        self.odom_msg.pose.pose.orientation.w = 0
+        self.odom_msg.pose.pose.orientation.w = 0 ### DELETE?
+
         rospy.loginfo('Connecting to Mambo drone...')
         connected = self.connect(self.num_connect_retries)
         if not connected:
             rospy.logerr('Failed to connect to Mambo drone')
             raise IOError('Failed to connect to Mambo drone')
+
         rospy.loginfo('Connected to Mambo drone')
 
         # Setup topics and services
@@ -90,7 +103,8 @@ class MamboNode(Mambo, object):
                             enum_value = sensor_enum[(sensor_name, "enum")][sensor_value]
                             sensor_value = enum_value
                     #self.sensors_changed[sensor_name] = sensor_value
-                    # TODO: Add pilot modes (easy, medium, hard)
+
+                    ### Telemetry msg
                     if (sensor_name == "BatteryStateChanged_battery_percent"):
                         self.sensors.battery_percent = sensor_value
                     elif (sensor_name == "FlyingStateChanged_state"):
@@ -109,7 +123,9 @@ class MamboNode(Mambo, object):
                         self.sensors.claw_state = str(sensor_value)                                        
                     elif (sensor_name == "PilotingModeChanged_mode"):
                         self.sensors.pilot_mode = sensor_value
-                        # TODO: check and document units
+    
+                    ### Odometry msg
+                    ### Height measured in meters.. 
                     elif (sensor_name == "DroneAltitude_altitude"):
                         self.odom_msg.pose.pose.position.z = sensor_value*1000
                     elif (sensor_name == "DroneQuaternion_q_w"):
@@ -119,8 +135,8 @@ class MamboNode(Mambo, object):
                     elif (sensor_name == "DroneQuaternion_q_y"):
                         self.odom_msg.pose.pose.orientation.y = sensor_value
                     elif (sensor_name == "DroneQuaternion_q_z"):
-                        self.odom_msg.pose.pose.orientation.z = sensor_value
-                        # TODO: check and document units
+                        self.odom_msg.pose.pose.orientation.z = sensor_value                    
+                    ### Speed in m/s
                     elif (sensor_name == "DroneSpeed_speed_x"):
                         self.odom_msg.twist.twist.linear.y = sensor_value
                     elif (sensor_name == "DroneSpeed_speed_y"):
@@ -140,8 +156,7 @@ class MamboNode(Mambo, object):
             self.odom_msg.header.stamp = rospy.Time.now()
             self.odom_msg.pose.pose.position.x = 0
             self.odom_msg.pose.pose.position.y = 0
-#            print(self.test.quaternion_to_euler_angle(self.odom_msg.pose.pose.orientation.w, self.odom_msg.pose.pose.orientation.x,
-            #self.odom_msg.pose.pose.orientation.y,self.odom_msg.pose.pose.orientation.z))
+            
             self.pub_telem.publish(self.sensors)
             self.pub_odom.publish(self.odom_msg)
 
@@ -190,34 +205,42 @@ class MamboNode(Mambo, object):
         notify_cmd_success('TogglePilotMode', success)
 
     def cb_toggle_cam(self, msg):
-        #True if module not loaded
+
+        ### True if loadable kernel module (LKM) not loaded
         if (os.system('lsmod | grep v4l2loopback -q')): 
             rospy.logwarn("Please run command: \"sudo modprobe v4l2loopback\"")
-        elif self.vid_stream==None:
-            calib_path = rospack.get_path('mambo_driver') + '/cam_calib/default.yaml'
-            calib_path = rospy.get_param('~cam_calib', calib_path)
-            self.caminfo = cim.loadCalibrationFile(calib_path, 'mambo_fpv')
-                                    
-            bashCommand = "ffmpeg -i rtsp://192.168.99.1/media/stream2 -f v4l2 /dev/video1 > ~/output.log 2>&1 < /dev/null &"
+
+        elif self.vid_stream == None:
+            bashCommand = "ffmpeg -i rtsp://192.168.99.1/media/stream2 -f v4l2 {} > ~/output.log 2>&1 < /dev/null &".format(self.device_node)
             os.system(bashCommand)
+            
             self.bridge = CvBridge()
-            self.stream = cv2.VideoCapture('/dev/video1')
-            rospy.loginfo('Piping stream to \'/dev/video1\'')        
-            cam_fps = rospy.get_param('~cam_fps', 40)
+            self.stream = cv2.VideoCapture(self.device_node)
 
-            rospy.Timer(rospy.Duration(1.0/cam_fps), self.publish_video)
+            rospy.loginfo("Piping stream to \'{}\'".format(self.device_node))        
 
+            rospy.Timer(rospy.Duration(1.0/self.cam_fps), self.publish_video)
+            self.vid_stream = True
+        
     def publish_video(self, event):
         try:
             _, frame = self.stream.read()
+
             if frame is not None:
-                self.pub_image.publish(self.bridge.cv2_to_imgmsg(frame,'rgb8'))
+                stamp = rospy.Time.now()
+            	img_msg = self.bridge.cv2_to_imgmsg(frame,'rgb8')
+            	img_msg.header.frame_id = self.caminfo.header.frame_id
+                img_msg.header.stamp = stamp
+                self.pub_image.publish(img_msg)
+                
+                self.caminfo.header.stamp = stamp 
                 self.pub_caminfo.publish(self.caminfo)
+
         except CvBridgeError as e:
             print(e)
                 
     def cb_snapshot(self, msg):
-        success = self.flat_trim()
+        success = None
         notify_cmd_success('Snapshot', success)
 
     def cb_flip(self, msg):
@@ -247,7 +270,7 @@ class MamboNode(Mambo, object):
         self.fly_direct(roll, pitch, yaw, vertical_movement) # TODO: fix this: don't send if drone state not flying
 
 
-########################    ADDED FUNCTIONS    ################################
+########################    ADDING FUNCTIONS TO MAMBO INTERFACE   ################################
     def set_banked_turn_mode(self, arg):
         """
         Turn on/off the banked turn mode
@@ -257,7 +280,7 @@ class MamboNode(Mambo, object):
 
         return self.drone_connection.send_param_command_packet(command_tuple, param_tuple=[arg], param_type_tuple=["u8"])
 
-#########################    OVERRIDING FUNCTIONS    ###########################
+#########################    OVERRIDING FUNCTIONS OF MAMBO INTERFACE   ###########################
 
     def set_preferred_pilot_mode(self, mode):
         """
@@ -330,13 +353,13 @@ class MamboNode(Mambo, object):
         :param ack: True if this packet needs to be ack'd and False otherwise
         """
         self.sensors_updated = {}
-
+        self.update_timeLast = rospy.Time.now()
         sensor_list = self.sensor_parser.extract_sensor_values(raw_data)
 
 		#Dictionary with updated sensors from current package send by drone
+       
         #print("Sensors changed {},\n secs since last package: {}".format(self.sensors_changed, (rospy.Time.now() - self.update_timeLast).to_sec()))
         self.cb_sensor_update(sensor_list)
-        self.update_timeLast = rospy.Time.now()
 
         if (ack):
             self.drone_connection.ack_packet(buffer_id, sequence_number)                

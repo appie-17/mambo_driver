@@ -1,16 +1,29 @@
 <?xml version="1.0"?>
 <launch>
-    <arg name="namespace" default="mambo" />
+
+    <arg name="namespace" default="/mambo" />
     <arg name="use_wifi" default="True" />
     <arg name="bluetooth_addr" default="e0:14:ef:39:3d:d1" />
-
-	<node pkg="image_proc" name="image_rectify" type="image_proc" ns="$(arg namespace)/camera">
-	</node>
+    <arg name="device_node" default="/dev/video1" />
+	<arg name="camera_calib"	default="$(find mambo_driver)/cam_calib/mambo.yaml" />    
+	<arg name="camera_frame"	default="/camera_front" />
 	
     <group ns="$(arg namespace)">
+
         <node pkg="mambo_driver" name="mambo" type="mambo_driver_node.py" output="screen">
             <param name="use_wifi" value="$(arg use_wifi)" />
             <param name="bluetooth_addr" value="$(arg bluetooth_addr)" />
+            <param name="device_node" value="$(arg device_node)" />
+			<param name="camera_frame" value="$(arg namespace)$(arg camera_frame)" />
+			<param name="camera_calib" value="$(arg camera_calib)" />
         </node>
+
     </group>
+
+	<node pkg="image_proc" name="image_rectify" type="image_proc" ns="$(arg namespace)/camera">
+	</node>
+
+	<!-- Tf from mambo odom to "cam_front" -->
+	<node pkg="tf" type="static_transform_publisher" name="tf_cam" args="0 0.03 0.015 3.14 -3.14 1.57 $(arg namespace)/base_link $(arg namespace)$(arg camera_frame) 10"/>
+
 </launch>

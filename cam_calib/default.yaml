@@ -1,6 +1,6 @@
 image_width: 640
 image_height: 360
-camera_name: mambo_fpv
+camera_name: camera_front
 camera_matrix:
   rows: 3
   cols: 3
