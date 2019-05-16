@@ -60,7 +60,7 @@ class MamboNode(Mambo, object):
             raise IOError('Failed to connect to Mambo drone')
 
         rospy.loginfo('Connected to Mambo drone')
-
+        self.cb_toggle_cam(Empty)
         # Setup topics and services
         # NOTE: ROS interface deliberately made to resemble bebop_autonomy
         self.pub_telem = rospy.Publisher('telemetry', MamboTelem, queue_size=1, latch=True)
