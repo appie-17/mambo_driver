@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import sys, os
 ### Needed to import correct OpenCV version....
-sys.path.insert(0,os.environ['HOME'] + '/.local/lib/python2.7/site-packages')
+sys.path.insert(0,'/usr/local/lib/python2.7/dist-packages')
 
 import rospy
 import cv2
