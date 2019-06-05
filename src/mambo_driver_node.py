@@ -46,21 +46,12 @@ class MamboNode(Mambo, object):
         self.calib_path = rospy.get_param('~camera_calib', default_calib_path) 
         self.caminfo = cim.loadCalibrationFile(self.calib_path, 'camera_front')
         self.caminfo.header.frame_id = rospy.get_param('~camera_frame', 'camera_front')
-
-        # Connect to drone
+       
         self.mambo = super(MamboNode, self).__init__(self.bluetooth_addr, self.use_wifi)
         self.sensors = MamboTelem()
         self.odom_msg = Odometry()
         self.odom_msg.pose.pose.orientation.w = 0 ### DELETE?
 
-        rospy.loginfo('Connecting to Mambo drone...')
-        connected = self.connect(self.num_connect_retries)
-        if not connected:
-            rospy.logerr('Failed to connect to Mambo drone')
-            raise IOError('Failed to connect to Mambo drone')
-
-        rospy.loginfo('Connected to Mambo drone')
-        self.cb_toggle_cam(Empty)
         # Setup topics and services
         # NOTE: ROS interface deliberately made to resemble bebop_autonomy
         self.pub_telem = rospy.Publisher('telemetry', MamboTelem, queue_size=1, latch=True)
@@ -77,7 +68,17 @@ class MamboNode(Mambo, object):
         self.sub_snapshot = rospy.Subscriber('snapshot', Empty, self.cb_snapshot, queue_size=1)
         self.sub_flip = rospy.Subscriber('flip', UInt8, self.cb_flip, queue_size=1)
         self.sub_auto_takeoff = rospy.Subscriber('auto_takeoff', Empty, self.cb_auto_takeoff, queue_size=1)
+       
+        # Connect to drone       
+        rospy.loginfo('Connecting to Mambo drone...')
+        connected = self.connect(self.num_connect_retries)
+        if not connected:
+            rospy.logerr('Failed to connect to Mambo drone')
+            raise IOError('Failed to connect to Mambo drone')
 
+        rospy.loginfo('Connected to Mambo drone')
+        self.cb_toggle_cam(Empty)
+        
         # Setup dynamic reconfigure
         self.cfg = None
         self.srv_dyncfg = Server(MamboConfig, self.cb_dyncfg)
@@ -211,7 +212,7 @@ class MamboNode(Mambo, object):
             rospy.logwarn("Please run command: \"sudo modprobe v4l2loopback\"")
 
         elif self.vid_stream == None:
-            bashCommand = "ffmpeg -i rtsp://192.168.99.1/media/stream2 -f v4l2 /dev/video1 > ~/output.log 2>&1 < /dev/null &".format(self.device_node)
+            bashCommand = "ffmpeg -i rtsp://192.168.99.1/media/stream2 -f v4l2 {} > ~/output.log 2>&1 < /dev/null &".format(self.device_node)
             os.system(bashCommand)
             
             self.bridge = CvBridge()
