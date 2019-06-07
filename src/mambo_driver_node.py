@@ -228,7 +228,7 @@ class MamboNode(Mambo, object):
 
             if frame is not None:
                 stamp = rospy.Time.now()
-            	img_msg = self.bridge.cv2_to_imgmsg(frame,'rgb8')
+            	img_msg = self.bridge.cv2_to_imgmsg(frame,'bgr8')
             	img_msg.header.frame_id = self.caminfo.header.frame_id
                 img_msg.header.stamp = stamp
                 self.pub_image.publish(img_msg)
