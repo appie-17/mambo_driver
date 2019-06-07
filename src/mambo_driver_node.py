@@ -211,7 +211,7 @@ class MamboNode(Mambo, object):
             rospy.logwarn("Please run command: \"sudo modprobe v4l2loopback\"")
 
         elif self.vid_stream == None:
-            bashCommand = "ffmpeg -i rtsp://192.168.99.1/media/stream2 -f v4l2 /dev/video1 > ~/output.log 2>&1 < /dev/null &".format(self.device_node)
+            bashCommand = "ffmpeg -i rtsp://192.168.99.1/media/stream2 -f v4l2 {} > ~/output.log 2>&1 < /dev/null &".format(self.device_node)
             os.system(bashCommand)
             
             self.bridge = CvBridge()
